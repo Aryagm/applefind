@@ -81,6 +81,12 @@ Format exact content grep results as markdown:
 python3 applefind/scripts/compare_fff_content.py --root /tmp/linux --query-set linux --iters 3 --limit 200
 ```
 
+Compare exact content grep directly against `ripgrep`:
+
+```bash
+python3 applefind/scripts/compare_rg_content.py --root /tmp/linux --query-set linux --iters 3 --limit 200
+```
+
 ## Benchmark Snapshot
 
 Fresh runs on April 20, 2026:

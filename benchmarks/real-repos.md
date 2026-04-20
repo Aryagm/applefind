@@ -13,6 +13,8 @@ This page complements [`benchmarks/popular-repos.md`](popular-repos.md):
   trees from large repos
 - this page uses a real repo checkout so we can measure the same two surfaces
   `fff` exposes in practice: fuzzy file search and exact plain-text grep
+- it also adds a direct `ripgrep` comparison for exact literal grep, because
+  that is the strongest widely-used baseline for content search
 
 ## Linux Checkout Notes
 
@@ -76,3 +78,58 @@ That upfront cost is the current trade: the prototype pays a heavy one-time
 build cost to get much lower per-query latency. Until the content index is
 persistent and incremental, these numbers are best understood as a resident
 index story, not a one-shot grep replacement story.
+
+## Ripgrep Comparison
+
+For a stronger grep baseline, the repo now includes:
+
+```bash
+python3 applefind/scripts/compare_rg_content.py --root /tmp/linux --query-set linux --iters 3 --limit 200
+python3 applefind/scripts/compare_rg_content.py --root /tmp/rust --query-set rust --iters 3 --limit 200
+```
+
+This benchmark compares:
+
+- `applefind` warm exact grep on a resident in-memory index
+- `rg` literal search with `--fixed-strings --smart-case --hidden --max-filesize 10M`
+
+The `break-even` column tells you how many queries it takes to amortize the
+one-time `applefind` index build for that query shape.
+
+### Linux vs `ripgrep`
+
+| query | applefind | ripgrep | speedup | candidates | apple lines | rg lines | break-even |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `module_init` | 4.66ms | 43.99ms | 9.44x | 14543 | 196 | 200 | 692q |
+| `copy_from_user` | 1.61ms | 22.07ms | 13.68x | 1629 | 200 | 200 | 1331q |
+| `spin_lock_irqsave` | 1.93ms | 19.57ms | 10.12x | 3800 | 200 | 200 | 1543q |
+| `EXPORT_SYMBOL_GPL` | 1.39ms | 6.32ms | 4.55x | 3716 | 200 | 200 | 5517q |
+| `of_match_ptr` | 11.68ms | 1032.26ms | 88.38x | 1553 | 200 | 200 | 27q |
+| `dma_alloc_coherent` | 3.29ms | 429.27ms | 130.41x | 1369 | 197 | 200 | 64q |
+
+Linux build time for that run:
+
+- `applefind`: `27.211304083s`
+
+### Rust vs `ripgrep`
+
+| query | applefind | ripgrep | speedup | candidates | apple lines | rg lines | break-even |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `rustc_span` | 1.32ms | 19.73ms | 14.97x | 1659 | 191 | 200 | 220q |
+| `parse_sess` | 1.05ms | 1552.85ms | 1473.72x | 358 | 3 | 3 | 3q |
+| `TokenKind` | 490us | 124.72ms | 254.53x | 67 | 194 | 200 | 33q |
+| `CrateNum` | 920us | 340.68ms | 370.10x | 1370 | 190 | 200 | 12q |
+| `cfg_attr` | 1.08ms | 20.44ms | 18.91x | 1219 | 188 | 200 | 209q |
+| `rustc_middle` | 1.05ms | 14.86ms | 14.11x | 1460 | 198 | 200 | 293q |
+
+Rust build time for that run:
+
+- `applefind`: `4.04464825s`
+
+This is the cleanest defensible claim in the repo today:
+
+> for repeated exact literal grep over large codebases, a resident index can
+> answer queries much faster than scan-based grep
+
+It is not yet honest to call this “fastest grep overall.” `ripgrep` still wins
+the cold one-shot workflow because it has essentially zero build phase.
