@@ -39,6 +39,7 @@ version = "0.1.0"
 dependencies = [
  "fff-search",
  "ignore",
+ "memchr",
  "neo_frizbee",
  "rayon",
 ]

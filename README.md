@@ -21,6 +21,7 @@ the current path search engine.
 - indexed candidate generation over path metadata
 - `neo_frizbee` reranking over reduced fuzzy candidate sets
 - bounded typo and acronym matching
+- experimental exact content index with trigram candidate pruning
 - benchmark CLI for scan vs indexed comparisons
 - `fff.nvim` comparison harness on identical corpora
 
@@ -66,6 +67,12 @@ Compare result quality directly against `fff`:
 
 ```bash
 cargo run --release --manifest-path applefind/Cargo.toml --features compare-fff --bin compare-fff-quality -- --root /tmp/rust-empty --format plain
+```
+
+Compare exact content grep against `fff` plain-text grep:
+
+```bash
+cargo run --release --manifest-path applefind/Cargo.toml --features compare-fff --bin compare-fff-grep -- --root /tmp/fff.nvim --iters 5 --limit 200
 ```
 
 ## Benchmark Snapshot
@@ -152,12 +159,25 @@ python3 -m http.server
 The demo is for feel and explanation. The benchmark numbers in this repo come
 from the native Rust CLI.
 
+## Exact Grep Prototype
+
+The repo now also includes an experimental exact content index in
+[`src/content.rs`](src/content.rs). It is a literal grep engine:
+
+- file-level trigram candidate pruning
+- exact line extraction
+- lowercase-query smart-case approximation for ASCII-heavy codebases
+
+This is still narrower than a full grep product. Regex search, content-side
+fuzzy matching, persistent on-disk indexes, and incremental updates are still
+open work.
+
 ## Publishability Gaps Still Open
 
 - broad fuzzy queries still need better pruning
 - matching semantics still need to close more of the gap with `fff`
 - there is no persistent resident index yet
-- content search and grep are future work
+- regex grep, fuzzy grep, and incremental content indexing are future work
 
 ## Development
 
