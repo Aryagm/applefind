@@ -231,21 +231,12 @@ impl PathIndex {
         let threads = fuzzy_threads(candidate_ids.len());
 
         for token in &parsed.tokens {
-            let path_haystacks: Vec<&str> = current
-                .iter()
-                .map(|(id, _)| self.entries[*id as usize].path.as_str())
-                .collect();
             let basename_haystacks: Vec<&str> = current
                 .iter()
                 .map(|(id, _)| self.entries[*id as usize].basename_original())
                 .collect();
             let config = fuzzy_config_for_token(token.text.as_str());
-            let path_matches = match_list_parallel(
-                token.text.as_str(),
-                path_haystacks.as_slice(),
-                &config,
-                threads,
-            );
+            let should_match_path = should_match_path_fuzzy(token, current.len());
             let basename_matches = match_list_parallel(
                 token.text.as_str(),
                 basename_haystacks.as_slice(),
@@ -253,10 +244,25 @@ impl PathIndex {
                 if current.len() >= 4_096 { threads } else { 1 },
             );
 
-            let mut path_scores = vec![None; current.len()];
-            for matched in path_matches {
-                path_scores[matched.index as usize] = Some(matched);
-            }
+            let path_scores = if should_match_path {
+                let path_haystacks: Vec<&str> = current
+                    .iter()
+                    .map(|(id, _)| self.entries[*id as usize].path.as_str())
+                    .collect();
+                let path_matches = match_list_parallel(
+                    token.text.as_str(),
+                    path_haystacks.as_slice(),
+                    &config,
+                    threads,
+                );
+                let mut scores = vec![None; current.len()];
+                for matched in path_matches {
+                    scores[matched.index as usize] = Some(matched);
+                }
+                Some(scores)
+            } else {
+                None
+            };
 
             let mut basename_scores = vec![None; current.len()];
             for matched in basename_matches {
@@ -266,9 +272,12 @@ impl PathIndex {
             let mut next = Vec::with_capacity(current.len().min(8_192));
             for (idx, (id, accumulated)) in current.into_iter().enumerate() {
                 let entry = &self.entries[id as usize];
-                if let Some(token_score) =
-                    score_fuzzy_token(entry, token, path_scores[idx], basename_scores[idx])
-                {
+                if let Some(token_score) = score_fuzzy_token(
+                    entry,
+                    token,
+                    path_scores.as_ref().and_then(|scores| scores[idx]),
+                    basename_scores[idx],
+                ) {
                     next.push((id, accumulated.saturating_add(token_score)));
                 }
             }
@@ -627,6 +636,10 @@ fn fuzzy_threads(candidate_count: usize) -> usize {
     } else {
         available.min(8)
     }
+}
+
+fn should_match_path_fuzzy(token: &QueryToken, candidate_count: usize) -> bool {
+    token.text.len() >= 4 && candidate_count <= 4_096
 }
 
 fn score_entry(entry: &PathEntry, parsed: &ParsedQuery) -> Option<u32> {
