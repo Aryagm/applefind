@@ -1,45 +1,90 @@
 # applefind
 
-Prototype Apple-focused file search core.
+Fast indexed path search core in Rust.
 
-Current direction:
+`applefind` is built around one bet:
 
-- Apple-focused path search
-- indexed candidate generation first
-- exact/fuzzy-ish scoring over the reduced set
-- benchmark CLI and `fff` comparison harness
+> generate a small candidate set first, then score it
 
-The point is to measure the first architectural bet:
+instead of fuzzy-scoring the entire repo on every query. The current engine
+indexes basename/path characters, bigrams, trigrams, path components, and
+acronyms, intersects those postings per token, and only then runs exact,
+path-like, acronym, typo, or subsequence scoring on the reduced set.
 
-> candidate generation first, exact scoring second
+This is a portable Rust core. It runs on macOS, Linux, and Windows. Apple-
+specific acceleration is a future path for content search, not a dependency for
+the current path search engine.
 
-instead of scoring the entire corpus on every query.
+## What It Does Today
 
-## Commands
+- repo-scale path collection with `ignore`
+- indexed candidate generation over path metadata
+- bounded typo and acronym matching
+- benchmark CLI for scan vs indexed comparisons
+- `fff.nvim` comparison harness on identical corpora
+
+## Quick Start
+
+Run a synthetic benchmark:
 
 ```bash
 cargo run --release --manifest-path applefind/Cargo.toml -- bench --synthetic 250000 --iters 100
 ```
 
+Search the current repo:
+
 ```bash
 cargo run --release --manifest-path applefind/Cargo.toml -- search --root . controller
 ```
 
-Build an empty-file corpus from any git tree:
+Materialize any git tree as an empty-file corpus:
 
 ```bash
-python3 applefind/scripts/materialize_git_tree.py /tmp/chromium-src-meta /tmp/chromium-empty
+python3 applefind/scripts/materialize_git_tree.py /tmp/rust-meta /tmp/rust-empty
 ```
 
 Compare `applefind` to `fff` on the same corpus:
 
 ```bash
-python3 applefind/scripts/compare_fff.py --root /tmp/chromium-empty --fff-repo /tmp/fff.nvim --iters 10
+python3 applefind/scripts/compare_fff.py --root /tmp/rust-empty --fff-repo /tmp/fff.nvim --iters 10
 ```
+
+## Benchmark Snapshot
+
+Fresh runs on April 20, 2026:
+
+| repo | collected files | applefind | fff |
+|---|---:|---:|---:|
+| Chromium `2f4ad52b` | 447,250 | `controller` `632us` | `56.47ms` |
+| Linux `da6b5aa` | 93,412 | `drivers/net` `527us` | `7.58ms` |
+| Rust `91367b0` | 58,936 | `src/lib` `31us` | `4.13ms` |
+| VS Code `7f7a471` | 13,106 | `controller` `25us` | `1.94ms` |
+
+Full tables, corpus counts, and methodology live in
+[`benchmarks/popular-repos.md`](benchmarks/popular-repos.md).
+
+## Why It Is Faster
+
+The current speedup comes from a few simple systems choices:
+
+1. `applefind` does not start by scoring every path. It starts by asking which
+   paths could possibly match.
+2. Query planning is cheap. For most queries it becomes a handful of posting
+   lookups plus sorted-set intersections over IDs.
+3. Full scoring only runs on survivors. On Chromium, a query like `controller`
+   falls from `447,250` paths to `5,777` candidates before scoring.
+4. Result selection avoids a full sort. The engine uses
+   `select_nth_unstable_by` for top-k truncation and only sorts the retained
+   frontier.
+5. Large candidate sets score in parallel with `rayon`.
+
+That is why the win is strongest on selective and path-like queries. Broad
+one-character or very common queries still collapse toward scan behavior, and
+that is where the next round of work belongs.
 
 ## Current Matching
 
-This version combines:
+The current matcher combines:
 
 - basename exact
 - basename prefix
@@ -47,50 +92,54 @@ This version combines:
 - path contains
 - basename acronym hits
 - bounded typo fallback
-- fuzzy-ish ordered subsequence fallback for basename terms
+- ordered subsequence fallback for basename terms
 
 Tokens containing `/` or `\` are treated as path tokens. Other tokens are
 matched against basename first, then full path.
 
-It is still not a drop-in semantic clone of `fff`'s fuzzy engine. The current
-goal is to prove the systems architecture on large corpora, then tighten fuzzy
-behavior without losing the indexed speed path.
+This is not a drop-in semantic clone of `fff` yet. The benchmark claim to make
+today is architectural:
 
-## Chromium Result
+> indexed candidate generation can cut interactive path-search latency by a lot
+> on large corpora
 
-Using Chromium `src.git` metadata at commit `2f4ad52b`, materialized as an
-empty-file tree and collected with the same hidden/ignore behavior as `fff`,
-both engines indexed `447,250` files.
+not:
 
-`applefind`:
+> this already reproduces every `fff` ranking decision
 
-- load: `1.33s`
-- build: `1.77s`
+## Web Demo
 
-`fff`:
+There is a small static demo in [`docs/index.html`](docs/index.html). It runs a
+browser-sized port of the query planner and scorer over a curated sample corpus
+so people can try the interaction model without building the CLI.
 
-- load: `1.75s`
+Open `docs/index.html` directly in a browser, or serve the repo root:
 
-Selected query results:
+```bash
+python3 -m http.server
+```
 
-| query | applefind | fff |
-|---|---:|---:|
-| `mod` | `1.17ms` | `28.68ms` |
-| `controller` | `612us` | `55.79ms` |
-| `user_authentication` | `98us` | `104.67ms` |
-| `contrlr` | `15.30ms` | `41.76ms` |
-| `src/lib` | `59us` | `51.78ms` |
-| `st` | `3.43ms` | `19.65ms` |
-| `test` | `3.66ms` | `29.01ms` |
+The demo is for feel and explanation. The benchmark numbers in this repo come
+from the native Rust CLI.
 
-This is the current state, not the final claim. The selective and path-like
-queries are already much faster. Broad fuzzy queries still need better matching
-and better pruning.
+## Publishability Gaps Still Open
 
-## Next Steps
+- broad fuzzy queries still need better pruning
+- matching semantics still need to close more of the gap with `fff`
+- there is no persistent resident index yet
+- content search and grep are future work
 
-1. Tighten fuzzy semantics to match `fff` more closely.
-2. Improve broad-query pruning so `st`-class queries also pull ahead.
-3. Add a direct compare binary instead of parsing profiler output.
-4. Add a resident daemon and incremental query refinement.
-5. Add a Metal backend for content search, not path search.
+## Development
+
+Run the test suite:
+
+```bash
+cargo test --manifest-path applefind/Cargo.toml
+```
+
+Run formatting and lints:
+
+```bash
+cargo fmt --manifest-path applefind/Cargo.toml --check
+cargo clippy --manifest-path applefind/Cargo.toml --all-targets -- -D warnings
+```

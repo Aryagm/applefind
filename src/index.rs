@@ -466,10 +466,8 @@ fn score_token(entry: &PathEntry, token: &QueryToken) -> Option<u32> {
                 Some(24_000u32.saturating_sub((pos as u32) * 8))
             } else if let Some(score) = score_acronym_match(basename_original, needle) {
                 Some(score)
-            } else if let Some(score) = score_typo_basename_match(basename_original, needle) {
-                Some(score)
             } else {
-                None
+                score_typo_basename_match(basename_original, needle)
             }
         }
     }

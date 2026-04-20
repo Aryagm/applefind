@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>applefind Demo</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main>
+      <section class="band intro">
+        <div class="wrap">
+          <p class="eyebrow">Indexed Path Search</p>
+          <h1>applefind</h1>
+          <p class="lede">
+            Type a path query and the demo narrows candidates before scoring them.
+            This page runs a small browser port over a sample corpus. The published
+            benchmark numbers come from the native Rust CLI.
+          </p>
+        </div>
+      </section>
+
+      <section class="band search">
+        <div class="wrap">
+          <label class="search-label" for="query-input">Query</label>
+          <div class="search-row">
+            <input id="query-input" type="text" autocomplete="off" spellcheck="false" value="controller">
+            <button id="clear-button" type="button">Clear</button>
+          </div>
+          <div class="example-row" aria-label="Example queries">
+            <button type="button" class="chip" data-query="controller">controller</button>
+            <button type="button" class="chip" data-query="src/lib">src/lib</button>
+            <button type="button" class="chip" data-query="contrlr">contrlr</button>
+            <button type="button" class="chip" data-query="drivers/net">drivers/net</button>
+            <button type="button" class="chip" data-query="rfhi">rfhi</button>
+            <button type="button" class="chip" data-query="auth manager">auth manager</button>
+          </div>
+
+          <div class="stats" id="stats">
+            <span><strong id="entry-count">0</strong> paths</span>
+            <span><strong id="candidate-count">0</strong> candidates</span>
+            <span><strong id="match-count">0</strong> matches</span>
+            <span><strong id="mode-label">indexed</strong> mode</span>
+            <span><strong id="elapsed-ms">0.00</strong> ms</span>
+          </div>
+
+          <ol class="results" id="results"></ol>
+        </div>
+      </section>
+
+      <section class="band benchmarks">
+        <div class="wrap">
+          <h2>Fresh Native Snapshot</h2>
+          <p class="section-copy">
+            Selected results from the Rust CLI on April 20, 2026.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Repo</th>
+                  <th>Files</th>
+                  <th>Query</th>
+                  <th>applefind</th>
+                  <th>fff</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Chromium</td>
+                  <td>447,250</td>
+                  <td><code>controller</code></td>
+                  <td>632us</td>
+                  <td>56.47ms</td>
+                </tr>
+                <tr>
+                  <td>Linux</td>
+                  <td>93,412</td>
+                  <td><code>drivers/net</code></td>
+                  <td>527us</td>
+                  <td>7.58ms</td>
+                </tr>
+                <tr>
+                  <td>Rust</td>
+                  <td>58,936</td>
+                  <td><code>src/lib</code></td>
+                  <td>31us</td>
+                  <td>4.13ms</td>
+                </tr>
+                <tr>
+                  <td>VS Code</td>
+                  <td>13,106</td>
+                  <td><code>controller</code></td>
+                  <td>25us</td>
+                  <td>1.94ms</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
