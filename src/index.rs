@@ -72,6 +72,12 @@ pub struct PathIndex {
     path_components: HashMap<Box<str>, Vec<u32>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RankingMode {
+    Exact,
+    Fuzzy,
+}
+
 impl PathIndex {
     pub fn build(paths: Vec<String>) -> Self {
         let entries: Vec<PathEntry> = paths.into_iter().map(PathEntry::new).collect();
@@ -116,19 +122,19 @@ impl PathIndex {
 
     pub fn search_indexed(&self, query: &str, limit: usize) -> SearchResult {
         let parsed = parse_query(query);
-        if parsed.tokens.iter().all(|token| token.text.len() <= 1) {
+        if should_bypass_index(&parsed) {
             return self.search_with_candidates(parsed, None, limit);
         }
         let mut candidates = self.candidates_for_query(&parsed);
         if should_use_fuzzy_ranking(&parsed)
-            && should_expand_fuzzy_candidates(candidates.len(), limit)
+            && should_expand_fuzzy_candidates(&parsed, candidates.len(), limit)
         {
             let fuzzy_candidates = self.fuzzy_candidates_for_query(&parsed);
             if should_accept_fuzzy_expansion(candidates.len(), fuzzy_candidates.len()) {
                 candidates = union_sorted(&candidates, &fuzzy_candidates);
             }
         }
-        if self.should_fallback_to_scan(candidates.len()) {
+        if self.should_fallback_to_scan(&parsed, candidates.len()) {
             return self.search_with_candidates(parsed, None, limit);
         }
         self.search_with_candidates(parsed, Some(candidates), limit)
@@ -152,7 +158,7 @@ impl PathIndex {
 
         let candidate_ids = candidates.unwrap_or_else(|| (0..self.entries.len() as u32).collect());
         let candidate_count = candidate_ids.len();
-        let mut scored = if should_use_fuzzy_ranking(&parsed) {
+        let mut scored = if choose_ranking_mode(&parsed, candidate_count) == RankingMode::Fuzzy {
             self.rank_fuzzy_candidates(&parsed, &candidate_ids)
         } else {
             self.rank_exact_candidates(&parsed, &candidate_ids)
@@ -589,12 +595,13 @@ impl PathIndex {
         out
     }
 
-    fn should_fallback_to_scan(&self, candidate_count: usize) -> bool {
+    fn should_fallback_to_scan(&self, parsed: &ParsedQuery, candidate_count: usize) -> bool {
         if self.entries.is_empty() {
             return false;
         }
 
-        candidate_count.saturating_mul(100) >= self.entries.len().saturating_mul(80)
+        let fallback_percent = fallback_scan_percent(parsed);
+        candidate_count.saturating_mul(100) >= self.entries.len().saturating_mul(fallback_percent)
     }
 }
 
@@ -606,8 +613,47 @@ fn should_use_fuzzy_ranking(parsed: &ParsedQuery) -> bool {
             .all(|token| token.field == SearchField::BasenameOrPath && token.text.len() >= 2)
 }
 
-fn should_expand_fuzzy_candidates(candidate_count: usize, _limit: usize) -> bool {
-    candidate_count < 32
+fn should_bypass_index(parsed: &ParsedQuery) -> bool {
+    parsed.tokens.iter().all(|token| token.text.len() <= 1)
+        || (parsed.tokens.len() == 1
+            && parsed.tokens[0].field == SearchField::BasenameOrPath
+            && parsed.tokens[0].text.len() <= 2)
+}
+
+fn choose_ranking_mode(parsed: &ParsedQuery, candidate_count: usize) -> RankingMode {
+    if should_use_short_query_exact_ranking(parsed, candidate_count) {
+        RankingMode::Exact
+    } else if should_use_fuzzy_ranking(parsed) {
+        RankingMode::Fuzzy
+    } else {
+        RankingMode::Exact
+    }
+}
+
+fn should_use_short_query_exact_ranking(parsed: &ParsedQuery, candidate_count: usize) -> bool {
+    candidate_count > 12_288
+        && parsed.tokens.len() == 1
+        && parsed.tokens[0].field == SearchField::BasenameOrPath
+        && parsed.tokens[0].text.len() <= 4
+}
+
+fn fallback_scan_percent(parsed: &ParsedQuery) -> usize {
+    if parsed.tokens.len() == 1
+        && parsed.tokens[0].field == SearchField::BasenameOrPath
+        && parsed.tokens[0].text.len() <= 2
+    {
+        60
+    } else {
+        80
+    }
+}
+
+fn should_expand_fuzzy_candidates(
+    parsed: &ParsedQuery,
+    candidate_count: usize,
+    _limit: usize,
+) -> bool {
+    candidate_count < 32 && parsed.tokens.iter().all(|token| token.text.len() <= 12)
 }
 
 fn should_accept_fuzzy_expansion(_strict_count: usize, fuzzy_count: usize) -> bool {
@@ -1048,7 +1094,8 @@ fn union_sorted(left: &[u32], right: &[u32]) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::PathIndex;
+    use super::{PathIndex, should_bypass_index, should_expand_fuzzy_candidates};
+    use crate::query::parse_query;
 
     fn sample_index() -> PathIndex {
         PathIndex::build(vec![
@@ -1107,5 +1154,23 @@ mod tests {
         assert_eq!(scan.hits, indexed.hits);
         assert_eq!(scan.stats.total_matches, indexed.stats.total_matches);
         assert!(!indexed.hits.is_empty());
+    }
+
+    #[test]
+    fn bypasses_index_for_single_two_character_query() {
+        let parsed = parse_query("st");
+        assert!(should_bypass_index(&parsed));
+    }
+
+    #[test]
+    fn skips_fuzzy_expansion_for_long_selective_query() {
+        let parsed = parse_query("user_authentication");
+        assert!(!should_expand_fuzzy_candidates(&parsed, 2, 20));
+    }
+
+    #[test]
+    fn keeps_fuzzy_expansion_for_normal_basename_query() {
+        let parsed = parse_query("controller");
+        assert!(should_expand_fuzzy_candidates(&parsed, 2, 20));
     }
 }
