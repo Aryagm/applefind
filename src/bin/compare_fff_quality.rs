@@ -3,8 +3,10 @@ use std::env;
 use std::path::PathBuf;
 use std::process;
 
-use applefind::PathIndex;
-use applefind::dataset::{collect_paths, default_bench_queries, normalize_root};
+use applefind::dataset::{
+    collect_paths, default_bench_queries, exact_bench_queries, normalize_root,
+};
+use applefind::{PathIndex, SearchMode};
 use fff_search::{
     FFFMode, FilePicker, FilePickerOptions, FuzzySearchOptions, PaginationArgs, QueryParser,
 };
@@ -23,6 +25,7 @@ struct Config {
     max_threads: usize,
     example_count: usize,
     format: OutputFormat,
+    applefind_mode: SearchMode,
     queries: Vec<String>,
 }
 
@@ -66,11 +69,11 @@ fn run() -> Result<(), String> {
     picker.collect_files().map_err(|err| err.to_string())?;
 
     let queries = if config.queries.is_empty() {
-        default_bench_queries()
-            .into_iter()
-            .filter(|query| *query != "a")
-            .map(str::to_string)
-            .collect()
+        let default_queries = match config.applefind_mode {
+            SearchMode::Auto => default_bench_queries(),
+            SearchMode::Exact => exact_bench_queries(),
+        };
+        default_queries.into_iter().map(str::to_string).collect()
     } else {
         config.queries.clone()
     };
@@ -99,6 +102,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
     let mut max_threads = 4usize;
     let mut example_count = 3usize;
     let mut format = OutputFormat::Plain;
+    let mut applefind_mode = SearchMode::Auto;
     let mut queries = Vec::new();
 
     let mut i = 0usize;
@@ -145,6 +149,13 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
                 format = parse_format(value)?;
                 i += 2;
             }
+            "--applefind-mode" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--applefind-mode requires a value".to_string())?;
+                applefind_mode = parse_search_mode(value)?;
+                i += 2;
+            }
             "--query" => {
                 let value = args
                     .get(i + 1)
@@ -169,6 +180,7 @@ fn parse_args(args: Vec<String>) -> Result<Config, String> {
         max_threads,
         example_count,
         format,
+        applefind_mode,
         queries,
     })
 }
@@ -194,7 +206,16 @@ fn print_usage() {
     println!("  --max-threads N       Thread count for fff search (default: 4)");
     println!("  --example-count N     Mismatch examples to print per side (default: 3)");
     println!("  --format plain|markdown|tsv");
+    println!("  --applefind-mode auto|exact");
     println!("  --query TEXT          Repeat to override default benchmark queries");
+}
+
+fn parse_search_mode(value: &str) -> Result<SearchMode, String> {
+    match value {
+        "auto" => Ok(SearchMode::Auto),
+        "exact" => Ok(SearchMode::Exact),
+        _ => Err("invalid applefind mode; expected auto or exact".to_string()),
+    }
 }
 
 fn compare_query(
@@ -203,7 +224,10 @@ fn compare_query(
     index: &PathIndex,
     picker: &FilePicker,
 ) -> QueryMetrics {
-    let apple = index.search_indexed(query, config.limit);
+    let apple = match config.applefind_mode {
+        SearchMode::Auto => index.search_indexed(query, config.limit),
+        SearchMode::Exact => index.search_indexed_exact(query, config.limit),
+    };
     let parsed = QueryParser::default().parse(query);
     let fff = picker.fuzzy_search(
         &parsed,

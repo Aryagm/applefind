@@ -38,6 +38,12 @@ Search the current repo:
 cargo run --release --manifest-path applefind/Cargo.toml -- search --root . controller
 ```
 
+Search the current repo in exact mode:
+
+```bash
+cargo run --release --manifest-path applefind/Cargo.toml -- search --root . --mode exact controller
+```
+
 Materialize any git tree as an empty-file corpus:
 
 ```bash
@@ -48,6 +54,12 @@ Compare `applefind` to `fff` on the same corpus:
 
 ```bash
 python3 applefind/scripts/compare_fff.py --root /tmp/rust-empty --fff-repo /tmp/fff.nvim --iters 10
+```
+
+Compare exact-mode `applefind` to `fff` on the exact query subset:
+
+```bash
+python3 applefind/scripts/compare_fff.py --root /tmp/rust-empty --fff-repo /tmp/fff.nvim --iters 10 --applefind-mode exact --query-set exact
 ```
 
 Compare result quality directly against `fff`:
@@ -105,6 +117,10 @@ The current matcher combines:
 
 Tokens containing `/` or `\` are treated as path tokens. Other tokens are
 matched against basename first, then full path.
+
+There is also an explicit `exact` mode for literal file/path search. In exact
+mode the planner stays literal and the scorer only uses basename/path exact,
+prefix, and substring matches; typo and acronym fallbacks are disabled.
 
 This is not a drop-in semantic clone of `fff` yet. The benchmark claim to make
 today is architectural:

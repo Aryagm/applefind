@@ -26,6 +26,29 @@ FFF_TO_QUERY = {
     "extension": ".rs",
 }
 
+DEFAULT_QUERIES = [
+    "mod",
+    "controller",
+    "user_authentication",
+    "contrlr",
+    "src/lib",
+    "st",
+    "test",
+    "drivers/net",
+    ".rs",
+]
+
+EXACT_QUERIES = [
+    "mod",
+    "controller",
+    "user_authentication",
+    "src/lib",
+    "st",
+    "test",
+    "drivers/net",
+    ".rs",
+]
+
 QUALITY_COLUMNS = [
     "query",
     "apple_hits",
@@ -51,6 +74,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fff-repo", required=True, help="Path to fff.nvim checkout")
     parser.add_argument("--iters", type=int, default=10, help="Iterations for applefind")
+    parser.add_argument(
+        "--applefind-mode",
+        choices=["auto", "exact"],
+        default="auto",
+        help="applefind search mode to benchmark",
+    )
+    parser.add_argument(
+        "--query-set",
+        choices=["default", "exact"],
+        default="default",
+        help="Which query subset to print from the shared benchmark set",
+    )
     return parser.parse_args()
 
 
@@ -113,18 +148,8 @@ def format_markdown(
     applefind: dict[str, dict[str, str]],
     fff: dict[str, dict[str, str]],
     quality: dict[str, dict[str, str]],
+    queries: list[str],
 ) -> str:
-    queries = [
-        "mod",
-        "controller",
-        "user_authentication",
-        "contrlr",
-        "src/lib",
-        "st",
-        "test",
-        "drivers/net",
-        ".rs",
-    ]
     lines = [
         "| query | applefind | fff | apple hits | fff hits | apple candidates | cand pct | overlap@10 | top1 same |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -162,6 +187,7 @@ def main() -> int:
     root = Path(args.root).resolve()
     manifest = Path(args.applefind_manifest).resolve()
     fff_repo = Path(args.fff_repo).resolve()
+    query_set = EXACT_QUERIES if args.query_set == "exact" else DEFAULT_QUERIES
 
     applefind_output = run(
         [
@@ -178,6 +204,8 @@ def main() -> int:
             str(root),
             "--iters",
             str(args.iters),
+            "--mode",
+            args.applefind_mode,
         ]
     )
 
@@ -197,6 +225,8 @@ def main() -> int:
             str(root),
             "--format",
             "tsv",
+            "--applefind-mode",
+            args.applefind_mode,
         ]
     )
 
@@ -216,7 +246,7 @@ def main() -> int:
     applefind_rows = parse_applefind(applefind_output)
     fff_rows = parse_fff(fff_output)
     quality_rows = parse_quality(quality_output)
-    print(format_markdown(applefind_rows, fff_rows, quality_rows))
+    print(format_markdown(applefind_rows, fff_rows, quality_rows, query_set))
     return 0
 
 

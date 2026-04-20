@@ -59,6 +59,13 @@ pub struct SearchResult {
     pub stats: SearchStats,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    #[default]
+    Auto,
+    Exact,
+}
+
 #[derive(Debug, Default)]
 pub struct PathIndex {
     entries: Vec<PathEntry>,
@@ -116,17 +123,49 @@ impl PathIndex {
     }
 
     pub fn search_scan(&self, query: &str, limit: usize) -> SearchResult {
+        self.search_scan_with_mode(query, limit, SearchMode::Auto)
+    }
+
+    pub fn search_scan_exact(&self, query: &str, limit: usize) -> SearchResult {
+        self.search_scan_with_mode(query, limit, SearchMode::Exact)
+    }
+
+    pub fn search_scan_with_mode(
+        &self,
+        query: &str,
+        limit: usize,
+        search_mode: SearchMode,
+    ) -> SearchResult {
         let parsed = parse_query(query);
-        self.search_with_candidates(parsed, None, limit)
+        self.search_with_candidates(parsed, None, limit, search_mode)
     }
 
     pub fn search_indexed(&self, query: &str, limit: usize) -> SearchResult {
+        self.search_indexed_with_mode(query, limit, SearchMode::Auto)
+    }
+
+    pub fn search_indexed_exact(&self, query: &str, limit: usize) -> SearchResult {
+        self.search_indexed_with_mode(query, limit, SearchMode::Exact)
+    }
+
+    pub fn search_indexed_with_mode(
+        &self,
+        query: &str,
+        limit: usize,
+        search_mode: SearchMode,
+    ) -> SearchResult {
         let parsed = parse_query(query);
         if should_bypass_index(&parsed) {
-            return self.search_with_candidates(parsed, None, limit);
+            return self.search_with_candidates(parsed, None, limit, search_mode);
         }
-        let mut candidates = self.candidates_for_query(&parsed);
-        if should_use_fuzzy_ranking(&parsed)
+
+        let mut candidates = match search_mode {
+            SearchMode::Auto => self.candidates_for_query(&parsed),
+            SearchMode::Exact => self.exact_candidates_for_query(&parsed),
+        };
+
+        if search_mode == SearchMode::Auto
+            && should_use_fuzzy_ranking(&parsed)
             && should_expand_fuzzy_candidates(&parsed, candidates.len(), limit)
         {
             let fuzzy_candidates = self.fuzzy_candidates_for_query(&parsed);
@@ -135,9 +174,9 @@ impl PathIndex {
             }
         }
         if self.should_fallback_to_scan(&parsed, candidates.len()) {
-            return self.search_with_candidates(parsed, None, limit);
+            return self.search_with_candidates(parsed, None, limit, search_mode);
         }
-        self.search_with_candidates(parsed, Some(candidates), limit)
+        self.search_with_candidates(parsed, Some(candidates), limit, search_mode)
     }
 
     fn search_with_candidates(
@@ -145,6 +184,7 @@ impl PathIndex {
         parsed: ParsedQuery,
         candidates: Option<Vec<u32>>,
         limit: usize,
+        search_mode: SearchMode,
     ) -> SearchResult {
         if parsed.tokens.is_empty() {
             return SearchResult {
@@ -158,10 +198,15 @@ impl PathIndex {
 
         let candidate_ids = candidates.unwrap_or_else(|| (0..self.entries.len() as u32).collect());
         let candidate_count = candidate_ids.len();
-        let mut scored = if choose_ranking_mode(&parsed, candidate_count) == RankingMode::Fuzzy {
-            self.rank_fuzzy_candidates(&parsed, &candidate_ids)
-        } else {
-            self.rank_exact_candidates(&parsed, &candidate_ids)
+        let mut scored = match search_mode {
+            SearchMode::Exact => self.rank_literal_candidates(&parsed, &candidate_ids),
+            SearchMode::Auto => {
+                if choose_ranking_mode(&parsed, candidate_count) == RankingMode::Fuzzy {
+                    self.rank_fuzzy_candidates(&parsed, &candidate_ids)
+                } else {
+                    self.rank_exact_candidates(&parsed, &candidate_ids)
+                }
+            }
         };
 
         let compare = |left: &(u32, u32), right: &(u32, u32)| {
@@ -220,6 +265,31 @@ impl PathIndex {
             for &id in candidate_ids {
                 let entry = &self.entries[id as usize];
                 if let Some(score) = score_entry(entry, parsed) {
+                    scored.push((id, score));
+                }
+            }
+            scored
+        }
+    }
+
+    fn rank_literal_candidates(
+        &self,
+        parsed: &ParsedQuery,
+        candidate_ids: &[u32],
+    ) -> Vec<(u32, u32)> {
+        if candidate_ids.len() >= 32_768 {
+            candidate_ids
+                .par_iter()
+                .filter_map(|&id| {
+                    let entry = &self.entries[id as usize];
+                    score_entry_literal(entry, parsed).map(|score| (id, score))
+                })
+                .collect()
+        } else {
+            let mut scored = Vec::with_capacity(candidate_ids.len().min(8_192));
+            for &id in candidate_ids {
+                let entry = &self.entries[id as usize];
+                if let Some(score) = score_entry_literal(entry, parsed) {
                     scored.push((id, score));
                 }
             }
@@ -415,6 +485,30 @@ impl PathIndex {
         current
     }
 
+    fn exact_candidates_for_query(&self, parsed: &ParsedQuery) -> Vec<u32> {
+        let mut token_candidates = Vec::with_capacity(parsed.tokens.len());
+
+        for token in &parsed.tokens {
+            let candidates = self.exact_candidates_for_token(token);
+            if candidates.is_empty() {
+                return Vec::new();
+            }
+            token_candidates.push(candidates);
+        }
+
+        token_candidates.sort_by_key(Vec::len);
+
+        let mut current = token_candidates.remove(0);
+        for next in token_candidates {
+            current = intersect_sorted(&current, &next);
+            if current.is_empty() {
+                break;
+            }
+        }
+
+        current
+    }
+
     fn candidates_for_token(&self, token: &QueryToken) -> Vec<u32> {
         match token.field {
             SearchField::Path => self.candidates_for_field(token.text.as_bytes(), false),
@@ -437,6 +531,16 @@ impl PathIndex {
                     self.approximate_candidates(token.text.as_bytes(), true)
                 }
             }
+        }
+    }
+
+    fn exact_candidates_for_token(&self, token: &QueryToken) -> Vec<u32> {
+        match token.field {
+            SearchField::Path => self.candidates_for_field(token.text.as_bytes(), false),
+            SearchField::BasenameOrPath => union_sorted(
+                &self.candidates_for_field(token.text.as_bytes(), true),
+                &self.candidates_for_field(token.text.as_bytes(), false),
+            ),
         }
     }
 
@@ -688,6 +792,15 @@ fn should_match_path_fuzzy(token: &QueryToken, candidate_count: usize) -> bool {
     token.text.len() >= 4 && candidate_count <= 4_096
 }
 
+fn score_entry_literal(entry: &PathEntry, parsed: &ParsedQuery) -> Option<u32> {
+    let mut total = 0u32;
+    for token in &parsed.tokens {
+        total = total.saturating_add(score_token_literal(entry, token)?);
+    }
+
+    Some(total.saturating_add(entry_rank_bonus(entry)))
+}
+
 fn score_entry(entry: &PathEntry, parsed: &ParsedQuery) -> Option<u32> {
     let mut total = 0u32;
     for token in &parsed.tokens {
@@ -701,6 +814,30 @@ fn entry_rank_bonus(entry: &PathEntry) -> u32 {
     let depth_bonus = 2_000u32.saturating_sub((entry.depth as u32) * 64);
     let basename_len_bonus = 1_024u32.saturating_sub(entry.basename().len() as u32);
     depth_bonus.saturating_add(basename_len_bonus)
+}
+
+fn score_token_literal(entry: &PathEntry, token: &QueryToken) -> Option<u32> {
+    let basename = entry.basename();
+    let path = entry.lower.as_str();
+    let needle = token.text.as_str();
+
+    match token.field {
+        SearchField::Path => path
+            .find(needle)
+            .map(|pos| 24_000u32.saturating_sub((pos as u32) * 8)),
+        SearchField::BasenameOrPath => {
+            if basename == needle {
+                Some(64_000u32.saturating_sub(basename.len() as u32))
+            } else if basename.starts_with(needle) {
+                Some(56_000u32.saturating_sub(basename.len() as u32))
+            } else if let Some(pos) = basename.find(needle) {
+                Some(48_000u32.saturating_sub((pos as u32) * 16))
+            } else {
+                path.find(needle)
+                    .map(|pos| 24_000u32.saturating_sub((pos as u32) * 8))
+            }
+        }
+    }
 }
 
 fn score_token(entry: &PathEntry, token: &QueryToken) -> Option<u32> {
@@ -1094,7 +1231,7 @@ fn union_sorted(left: &[u32], right: &[u32]) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{PathIndex, should_bypass_index, should_expand_fuzzy_candidates};
+    use super::{PathIndex, SearchMode, should_bypass_index, should_expand_fuzzy_candidates};
     use crate::query::parse_query;
 
     fn sample_index() -> PathIndex {
@@ -1172,5 +1309,22 @@ mod tests {
     fn keeps_fuzzy_expansion_for_normal_basename_query() {
         let parsed = parse_query("controller");
         assert!(should_expand_fuzzy_candidates(&parsed, 2, 20));
+    }
+
+    #[test]
+    fn indexed_exact_and_scan_exact_match_for_literal_query() {
+        let index = sample_index();
+        let scan = index.search_scan_with_mode("controller", 10, SearchMode::Exact);
+        let indexed = index.search_indexed_with_mode("controller", 10, SearchMode::Exact);
+        assert_eq!(scan.hits, indexed.hits);
+        assert_eq!(scan.stats.total_matches, indexed.stats.total_matches);
+    }
+
+    #[test]
+    fn exact_mode_does_not_return_typo_matches() {
+        let index = sample_index();
+        let exact = index.search_indexed_exact("contrlr", 10);
+        assert!(exact.hits.is_empty());
+        assert_eq!(exact.stats.total_matches, 0);
     }
 }

@@ -138,6 +138,19 @@ pub fn default_bench_queries() -> Vec<&'static str> {
     ]
 }
 
+pub fn exact_bench_queries() -> Vec<&'static str> {
+    vec![
+        "mod",
+        "controller",
+        "user_authentication",
+        "src/lib",
+        "st",
+        "test",
+        "drivers/net",
+        ".rs",
+    ]
+}
+
 pub fn normalize_root(root: &str) -> io::Result<PathBuf> {
     std::fs::canonicalize(root)
 }

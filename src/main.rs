@@ -4,9 +4,10 @@ use std::process;
 use std::time::{Duration, Instant};
 
 use applefind::dataset::{
-    collect_paths, default_bench_queries, generate_synthetic_paths, normalize_root,
+    collect_paths, default_bench_queries, exact_bench_queries, generate_synthetic_paths,
+    normalize_root,
 };
-use applefind::{PathIndex, SearchResult};
+use applefind::{PathIndex, SearchMode, SearchResult};
 
 enum DatasetSource {
     Root(PathBuf),
@@ -41,6 +42,7 @@ fn run() -> Result<(), String> {
 fn run_search(args: Vec<String>) -> Result<(), String> {
     let mut source = None;
     let mut limit = 20usize;
+    let mut search_mode = SearchMode::Auto;
     let mut query_parts = Vec::new();
 
     let mut i = 0usize;
@@ -74,6 +76,13 @@ fn run_search(args: Vec<String>) -> Result<(), String> {
                     .map_err(|_| "invalid limit".to_string())?;
                 i += 2;
             }
+            "--mode" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--mode requires a value".to_string())?;
+                search_mode = parse_search_mode(value)?;
+                i += 2;
+            }
             value => {
                 query_parts.push(value.to_string());
                 i += 1;
@@ -95,8 +104,8 @@ fn run_search(args: Vec<String>) -> Result<(), String> {
     let index = PathIndex::build(paths);
     let build_time = build_start.elapsed();
 
-    let scan = index.search_scan(&query, limit);
-    let indexed = index.search_indexed(&query, limit);
+    let scan = run_scan_search(&index, &query, limit, search_mode);
+    let indexed = run_indexed_search(&index, &query, limit, search_mode);
 
     println!(
         "Loaded {} paths in {:?}, built index in {:?}",
@@ -116,6 +125,7 @@ fn run_bench(args: Vec<String>) -> Result<(), String> {
     let mut source = None;
     let mut iters = 100usize;
     let mut limit = 100usize;
+    let mut search_mode = SearchMode::Auto;
     let mut queries = Vec::new();
 
     let mut i = 0usize;
@@ -158,6 +168,13 @@ fn run_bench(args: Vec<String>) -> Result<(), String> {
                     .map_err(|_| "invalid limit".to_string())?;
                 i += 2;
             }
+            "--mode" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "--mode requires a value".to_string())?;
+                search_mode = parse_search_mode(value)?;
+                i += 2;
+            }
             "--query" => {
                 let value = args
                     .get(i + 1)
@@ -181,24 +198,30 @@ fn run_bench(args: Vec<String>) -> Result<(), String> {
     println!("load time    : {:?}", load_time);
     println!("build time   : {:?}", build_time);
     println!("iterations   : {iters}");
+    println!("mode         : {}", search_mode_label(search_mode));
     println!(
         "{:<18} {:>12} {:>12} {:>10} {:>12} {:>8}",
         "query", "scan", "indexed", "speedup", "candidates", "hits"
     );
 
     let bench_queries: Vec<String> = if queries.is_empty() {
-        default_bench_queries()
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+        match search_mode {
+            SearchMode::Auto => default_bench_queries(),
+            SearchMode::Exact => exact_bench_queries(),
+        }
+        .into_iter()
+        .map(str::to_string)
+        .collect()
     } else {
         queries
     };
 
     for query in &bench_queries {
-        let scan_elapsed = time_many(iters, || index.search_scan(query, limit));
-        let indexed = index.search_indexed(query, limit);
-        let indexed_elapsed = time_many(iters, || index.search_indexed(query, limit));
+        let scan_elapsed = time_many(iters, || run_scan_search(&index, query, limit, search_mode));
+        let indexed = run_indexed_search(&index, query, limit, search_mode);
+        let indexed_elapsed = time_many(iters, || {
+            run_indexed_search(&index, query, limit, search_mode)
+        });
         let speedup = if indexed_elapsed.is_zero() {
             0.0
         } else {
@@ -226,6 +249,45 @@ fn load_paths(source: DatasetSource) -> Result<(Vec<String>, Duration), String> 
         DatasetSource::Synthetic(count) => generate_synthetic_paths(count),
     };
     Ok((paths, start.elapsed()))
+}
+
+fn parse_search_mode(value: &str) -> Result<SearchMode, String> {
+    match value {
+        "auto" => Ok(SearchMode::Auto),
+        "exact" => Ok(SearchMode::Exact),
+        _ => Err("invalid mode; expected auto or exact".to_string()),
+    }
+}
+
+fn search_mode_label(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Auto => "auto",
+        SearchMode::Exact => "exact",
+    }
+}
+
+fn run_scan_search(
+    index: &PathIndex,
+    query: &str,
+    limit: usize,
+    search_mode: SearchMode,
+) -> SearchResult {
+    match search_mode {
+        SearchMode::Auto => index.search_scan(query, limit),
+        SearchMode::Exact => index.search_scan_exact(query, limit),
+    }
+}
+
+fn run_indexed_search(
+    index: &PathIndex,
+    query: &str,
+    limit: usize,
+    search_mode: SearchMode,
+) -> SearchResult {
+    match search_mode {
+        SearchMode::Auto => index.search_indexed(query, limit),
+        SearchMode::Exact => index.search_indexed_exact(query, limit),
+    }
 }
 
 fn time_many<F>(iters: usize, mut f: F) -> Duration
@@ -262,6 +324,8 @@ fn print_usage() {
     println!("applefind");
     println!();
     println!("Commands:");
-    println!("  search [--root PATH | --synthetic N] [--limit N] QUERY...");
-    println!("  bench  [--root PATH | --synthetic N] [--iters N] [--limit N] [--query TEXT]...");
+    println!("  search [--root PATH | --synthetic N] [--limit N] [--mode auto|exact] QUERY...");
+    println!(
+        "  bench  [--root PATH | --synthetic N] [--iters N] [--limit N] [--mode auto|exact] [--query TEXT]..."
+    );
 }
