@@ -108,3 +108,5 @@ Both engines indexed the same materialized VS Code tree. `applefind` collected
 - `applefind` is not yet a semantic clone of `fff`. A few result counts differ
   on typo-heavy or broad fuzzy queries. The current claim is latency and
   architecture, not identical ranking.
+- Use `compare-fff-quality` for overlap and mismatch examples when you want to
+  measure result quality instead of latency.

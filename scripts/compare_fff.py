@@ -26,6 +26,20 @@ FFF_TO_QUERY = {
     "extension": ".rs",
 }
 
+QUALITY_COLUMNS = [
+    "query",
+    "apple_hits",
+    "fff_hits",
+    "apple_candidates",
+    "apple_candidate_pct",
+    "top1_same",
+    "overlap_at_5",
+    "overlap_at_10",
+    "overlap_returned",
+    "apple_only_examples",
+    "fff_only_examples",
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Compare applefind and fff on the same corpus.")
@@ -79,7 +93,27 @@ def parse_fff(output: str) -> dict[str, dict[str, str]]:
     return rows
 
 
-def format_markdown(applefind: dict[str, dict[str, str]], fff: dict[str, dict[str, str]]) -> str:
+def parse_quality(output: str) -> dict[str, dict[str, str]]:
+    rows: dict[str, dict[str, str]] = {}
+    for idx, line in enumerate(output.splitlines()):
+        line = line.rstrip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if idx == 0 and parts == QUALITY_COLUMNS:
+            continue
+        if len(parts) != len(QUALITY_COLUMNS):
+            continue
+        data = dict(zip(QUALITY_COLUMNS, parts))
+        rows[data["query"]] = data
+    return rows
+
+
+def format_markdown(
+    applefind: dict[str, dict[str, str]],
+    fff: dict[str, dict[str, str]],
+    quality: dict[str, dict[str, str]],
+) -> str:
     queries = [
         "mod",
         "controller",
@@ -91,13 +125,35 @@ def format_markdown(applefind: dict[str, dict[str, str]], fff: dict[str, dict[st
         "drivers/net",
         ".rs",
     ]
-    lines = ["| query | applefind | fff | applefind candidates | applefind hits |", "|---|---:|---:|---:|---:|"]
+    lines = [
+        "| query | applefind | fff | apple hits | fff hits | apple candidates | cand pct | overlap@10 | top1 same |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
     for query in queries:
         af = applefind.get(query, {})
         ff = fff.get(query, {})
+        qf = quality.get(query, {})
         lines.append(
-            f"| `{query}` | {af.get('applefind', '-')} | {ff.get('fff', '-')} | {af.get('candidates', '-')} | {af.get('hits', '-')} |"
+            f"| `{query}` | {af.get('applefind', '-')} | {ff.get('fff', '-')} | {qf.get('apple_hits', af.get('hits', '-'))} | {qf.get('fff_hits', ff.get('fff_matches', '-'))} | {qf.get('apple_candidates', af.get('candidates', '-'))} | {qf.get('apple_candidate_pct', '-')}% | {qf.get('overlap_at_10', '-')} | {qf.get('top1_same', '-')} |"
         )
+
+    mismatch_lines: list[str] = []
+    for query in queries:
+        qf = quality.get(query, {})
+        apple_only = qf.get("apple_only_examples", "<none>")
+        fff_only = qf.get("fff_only_examples", "<none>")
+        if apple_only == "<none>" and fff_only == "<none>":
+            continue
+        mismatch_lines.append(f"### `{query}`")
+        mismatch_lines.append(f"- apple-only: {apple_only}")
+        mismatch_lines.append(f"- fff-only: {fff_only}")
+        mismatch_lines.append("")
+
+    if mismatch_lines:
+        lines.append("")
+        lines.append("## Mismatch Examples")
+        lines.extend(mismatch_lines[:-1] if mismatch_lines[-1] == "" else mismatch_lines)
+
     return "\n".join(lines)
 
 
@@ -114,12 +170,33 @@ def main() -> int:
             "--release",
             "--manifest-path",
             str(manifest),
+            "--bin",
+            "applefind",
             "--",
             "bench",
             "--root",
             str(root),
             "--iters",
             str(args.iters),
+        ]
+    )
+
+    quality_output = run(
+        [
+            "cargo",
+            "run",
+            "--release",
+            "--manifest-path",
+            str(manifest),
+            "--features",
+            "compare-fff",
+            "--bin",
+            "compare-fff-quality",
+            "--",
+            "--root",
+            str(root),
+            "--format",
+            "tsv",
         ]
     )
 
@@ -138,7 +215,8 @@ def main() -> int:
 
     applefind_rows = parse_applefind(applefind_output)
     fff_rows = parse_fff(fff_output)
-    print(format_markdown(applefind_rows, fff_rows))
+    quality_rows = parse_quality(quality_output)
+    print(format_markdown(applefind_rows, fff_rows, quality_rows))
     return 0
 
 

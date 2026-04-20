@@ -49,6 +49,12 @@ Compare `applefind` to `fff` on the same corpus:
 python3 applefind/scripts/compare_fff.py --root /tmp/rust-empty --fff-repo /tmp/fff.nvim --iters 10
 ```
 
+Compare result quality directly against `fff`:
+
+```bash
+cargo run --release --manifest-path applefind/Cargo.toml --features compare-fff --bin compare-fff-quality -- --root /tmp/rust-empty --format plain
+```
+
 ## Benchmark Snapshot
 
 Fresh runs on April 20, 2026:
@@ -106,6 +112,11 @@ today is architectural:
 not:
 
 > this already reproduces every `fff` ranking decision
+
+The repo now includes a dedicated quality harness for that gap. On path-like and
+selective queries the overlap is often reasonable; on broad fuzzy queries it is
+still far off `fff` because `applefind` is currently much stricter about what
+counts as a match.
 
 ## Web Demo
 

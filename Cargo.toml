@@ -3,6 +3,7 @@ name = "applefind"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
+default-run = "applefind"
 description = "Fast indexed path search core in Rust."
 readme = "README.md"
 license = "MIT"
@@ -11,6 +12,16 @@ homepage = "https://github.com/Aryagm/applefind"
 keywords = ["search", "fuzzy", "index", "cli"]
 categories = ["algorithms", "command-line-utilities"]
 
+[features]
+default = []
+compare-fff = ["dep:fff-search"]
+
+[[bin]]
+name = "compare-fff-quality"
+path = "src/bin/compare_fff_quality.rs"
+required-features = ["compare-fff"]
+
 [dependencies]
 ignore = "0.4"
 rayon = "1.11"
+fff-search = { git = "https://github.com/dmtrKovalenko/fff.nvim", rev = "91545f832c3aa3b36e58088e44461a071a709699", package = "fff-search", default-features = false, optional = true }
