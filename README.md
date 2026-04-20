@@ -75,6 +75,12 @@ Compare exact content grep against `fff` plain-text grep:
 cargo run --release --manifest-path applefind/Cargo.toml --features compare-fff --bin compare-fff-grep -- --root /tmp/fff.nvim --iters 5 --limit 200
 ```
 
+Format exact content grep results as markdown:
+
+```bash
+python3 applefind/scripts/compare_fff_content.py --root /tmp/linux --query-set linux --iters 3 --limit 200
+```
+
 ## Benchmark Snapshot
 
 Fresh runs on April 20, 2026:
@@ -87,7 +93,8 @@ Fresh runs on April 20, 2026:
 | VS Code `7f7a471` | 13,106 | `controller` `25us` | `1.94ms` |
 
 Full tables, corpus counts, and methodology live in
-[`benchmarks/popular-repos.md`](benchmarks/popular-repos.md).
+[`benchmarks/popular-repos.md`](benchmarks/popular-repos.md) and
+[`benchmarks/real-repos.md`](benchmarks/real-repos.md).
 
 ## Why It Is Faster
 
