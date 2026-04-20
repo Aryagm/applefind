@@ -24,4 +24,5 @@ required-features = ["compare-fff"]
 [dependencies]
 ignore = "0.4"
 rayon = "1.11"
+neo_frizbee = "0.10.1"
 fff-search = { git = "https://github.com/dmtrKovalenko/fff.nvim", rev = "91545f832c3aa3b36e58088e44461a071a709699", package = "fff-search", default-features = false, optional = true }

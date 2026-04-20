@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use neo_frizbee::{Config as FuzzyConfig, Match as FuzzyMatch, match_list_parallel};
 use rayon::prelude::*;
 
 use crate::query::{ParsedQuery, QueryToken, SearchField, parse_query};
@@ -118,7 +119,15 @@ impl PathIndex {
         if parsed.tokens.iter().all(|token| token.text.len() <= 1) {
             return self.search_with_candidates(parsed, None, limit);
         }
-        let candidates = self.candidates_for_query(&parsed);
+        let mut candidates = self.candidates_for_query(&parsed);
+        if should_use_fuzzy_ranking(&parsed)
+            && should_expand_fuzzy_candidates(candidates.len(), limit)
+        {
+            let fuzzy_candidates = self.fuzzy_candidates_for_query(&parsed);
+            if should_accept_fuzzy_expansion(candidates.len(), fuzzy_candidates.len()) {
+                candidates = union_sorted(&candidates, &fuzzy_candidates);
+            }
+        }
         if self.should_fallback_to_scan(candidates.len()) {
             return self.search_with_candidates(parsed, None, limit);
         }
@@ -143,23 +152,10 @@ impl PathIndex {
 
         let candidate_ids = candidates.unwrap_or_else(|| (0..self.entries.len() as u32).collect());
         let candidate_count = candidate_ids.len();
-        let mut scored = if candidate_count >= 32_768 {
-            candidate_ids
-                .par_iter()
-                .filter_map(|&id| {
-                    let entry = &self.entries[id as usize];
-                    score_entry(entry, &parsed).map(|score| (id, score))
-                })
-                .collect()
+        let mut scored = if should_use_fuzzy_ranking(&parsed) {
+            self.rank_fuzzy_candidates(&parsed, &candidate_ids)
         } else {
-            let mut scored = Vec::with_capacity(candidate_count.min(8_192));
-            for id in candidate_ids {
-                let entry = &self.entries[id as usize];
-                if let Some(score) = score_entry(entry, &parsed) {
-                    scored.push((id, score));
-                }
-            }
-            scored
+            self.rank_exact_candidates(&parsed, &candidate_ids)
         };
 
         let compare = |left: &(u32, u32), right: &(u32, u32)| {
@@ -198,6 +194,98 @@ impl PathIndex {
                 total_matches,
             },
         }
+    }
+
+    fn rank_exact_candidates(
+        &self,
+        parsed: &ParsedQuery,
+        candidate_ids: &[u32],
+    ) -> Vec<(u32, u32)> {
+        if candidate_ids.len() >= 32_768 {
+            candidate_ids
+                .par_iter()
+                .filter_map(|&id| {
+                    let entry = &self.entries[id as usize];
+                    score_entry(entry, parsed).map(|score| (id, score))
+                })
+                .collect()
+        } else {
+            let mut scored = Vec::with_capacity(candidate_ids.len().min(8_192));
+            for &id in candidate_ids {
+                let entry = &self.entries[id as usize];
+                if let Some(score) = score_entry(entry, parsed) {
+                    scored.push((id, score));
+                }
+            }
+            scored
+        }
+    }
+
+    fn rank_fuzzy_candidates(
+        &self,
+        parsed: &ParsedQuery,
+        candidate_ids: &[u32],
+    ) -> Vec<(u32, u32)> {
+        let mut current: Vec<(u32, u32)> =
+            candidate_ids.iter().copied().map(|id| (id, 0)).collect();
+        let threads = fuzzy_threads(candidate_ids.len());
+
+        for token in &parsed.tokens {
+            let path_haystacks: Vec<&str> = current
+                .iter()
+                .map(|(id, _)| self.entries[*id as usize].path.as_str())
+                .collect();
+            let basename_haystacks: Vec<&str> = current
+                .iter()
+                .map(|(id, _)| self.entries[*id as usize].basename_original())
+                .collect();
+            let config = fuzzy_config_for_token(token.text.as_str());
+            let path_matches = match_list_parallel(
+                token.text.as_str(),
+                path_haystacks.as_slice(),
+                &config,
+                threads,
+            );
+            let basename_matches = match_list_parallel(
+                token.text.as_str(),
+                basename_haystacks.as_slice(),
+                &config,
+                if current.len() >= 4_096 { threads } else { 1 },
+            );
+
+            let mut path_scores = vec![None; current.len()];
+            for matched in path_matches {
+                path_scores[matched.index as usize] = Some(matched);
+            }
+
+            let mut basename_scores = vec![None; current.len()];
+            for matched in basename_matches {
+                basename_scores[matched.index as usize] = Some(matched);
+            }
+
+            let mut next = Vec::with_capacity(current.len().min(8_192));
+            for (idx, (id, accumulated)) in current.into_iter().enumerate() {
+                let entry = &self.entries[id as usize];
+                if let Some(token_score) =
+                    score_fuzzy_token(entry, token, path_scores[idx], basename_scores[idx])
+                {
+                    next.push((id, accumulated.saturating_add(token_score)));
+                }
+            }
+
+            current = next;
+            if current.is_empty() {
+                break;
+            }
+        }
+
+        current
+            .into_iter()
+            .map(|(id, score)| {
+                let entry = &self.entries[id as usize];
+                (id, score.saturating_add(entry_rank_bonus(entry)))
+            })
+            .collect()
     }
 
     fn push_char_postings(&mut self, bytes: &[u8], id: u32, basename: bool) {
@@ -288,6 +376,30 @@ impl PathIndex {
         current
     }
 
+    fn fuzzy_candidates_for_query(&self, parsed: &ParsedQuery) -> Vec<u32> {
+        let mut token_candidates = Vec::with_capacity(parsed.tokens.len());
+
+        for token in &parsed.tokens {
+            let candidates = self.fuzzy_candidates_for_token(token);
+            if candidates.is_empty() {
+                return Vec::new();
+            }
+            token_candidates.push(candidates);
+        }
+
+        token_candidates.sort_by_key(Vec::len);
+
+        let mut current = token_candidates.remove(0);
+        for next in token_candidates {
+            current = intersect_sorted(&current, &next);
+            if current.is_empty() {
+                break;
+            }
+        }
+
+        current
+    }
+
     fn candidates_for_token(&self, token: &QueryToken) -> Vec<u32> {
         match token.field {
             SearchField::Path => self.candidates_for_field(token.text.as_bytes(), false),
@@ -308,6 +420,53 @@ impl PathIndex {
                     combined
                 } else {
                     self.approximate_candidates(token.text.as_bytes(), true)
+                }
+            }
+        }
+    }
+
+    fn fuzzy_candidates_for_token(&self, token: &QueryToken) -> Vec<u32> {
+        match token.field {
+            SearchField::Path => self.candidates_for_field(token.text.as_bytes(), false),
+            SearchField::BasenameOrPath => {
+                let bytes = token.text.as_bytes();
+                let exact = union_sorted(
+                    &self.candidates_for_field(bytes, true),
+                    &self.candidates_for_field(bytes, false),
+                );
+                let acronym = if token.text.len() >= 2 {
+                    self.basename_acronyms
+                        .get(token.text.as_str())
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let basename_chars = approximate_char_candidates(bytes, &self.basename_chars);
+                let path_chars = approximate_char_candidates(bytes, &self.path_chars);
+                let basename_bigrams = if token.text.len() >= 3 {
+                    self.approximate_candidates(bytes, true)
+                } else {
+                    Vec::new()
+                };
+                let path_bigrams = if token.text.len() >= 3 {
+                    self.approximate_candidates(bytes, false)
+                } else {
+                    Vec::new()
+                };
+
+                let combined = union_sorted(
+                    &union_sorted(&exact, &acronym),
+                    &union_sorted(
+                        &union_sorted(&basename_chars, &path_chars),
+                        &union_sorted(&basename_bigrams, &path_bigrams),
+                    ),
+                );
+
+                if combined.is_empty() {
+                    self.approximate_candidates(bytes, false)
+                } else {
+                    combined
                 }
             }
         }
@@ -430,19 +589,59 @@ impl PathIndex {
     }
 }
 
+fn should_use_fuzzy_ranking(parsed: &ParsedQuery) -> bool {
+    !parsed.tokens.is_empty()
+        && parsed
+            .tokens
+            .iter()
+            .all(|token| token.field == SearchField::BasenameOrPath && token.text.len() >= 2)
+}
+
+fn should_expand_fuzzy_candidates(candidate_count: usize, _limit: usize) -> bool {
+    candidate_count < 32
+}
+
+fn should_accept_fuzzy_expansion(_strict_count: usize, fuzzy_count: usize) -> bool {
+    fuzzy_count <= 4_096
+}
+
+fn fuzzy_config_for_token(needle: &str) -> FuzzyConfig {
+    let max_typos = (needle.len() as u16 / 4)
+        .clamp(2, 6)
+        .min(needle.len() as u16);
+    FuzzyConfig {
+        max_typos: Some(max_typos),
+        sort: false,
+        ..FuzzyConfig::default()
+    }
+}
+
+fn fuzzy_threads(candidate_count: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(|parallelism| parallelism.get())
+        .unwrap_or(4);
+    if candidate_count < 4_096 {
+        1
+    } else if candidate_count < 65_536 {
+        available.min(4)
+    } else {
+        available.min(8)
+    }
+}
+
 fn score_entry(entry: &PathEntry, parsed: &ParsedQuery) -> Option<u32> {
     let mut total = 0u32;
     for token in &parsed.tokens {
         total = total.saturating_add(score_token(entry, token)?);
     }
 
+    Some(total.saturating_add(entry_rank_bonus(entry)))
+}
+
+fn entry_rank_bonus(entry: &PathEntry) -> u32 {
     let depth_bonus = 2_000u32.saturating_sub((entry.depth as u32) * 64);
     let basename_len_bonus = 1_024u32.saturating_sub(entry.basename().len() as u32);
-    Some(
-        total
-            .saturating_add(depth_bonus)
-            .saturating_add(basename_len_bonus),
-    )
+    depth_bonus.saturating_add(basename_len_bonus)
 }
 
 fn score_token(entry: &PathEntry, token: &QueryToken) -> Option<u32> {
@@ -473,6 +672,69 @@ fn score_token(entry: &PathEntry, token: &QueryToken) -> Option<u32> {
     }
 }
 
+fn score_fuzzy_token(
+    entry: &PathEntry,
+    token: &QueryToken,
+    path_match: Option<FuzzyMatch>,
+    basename_match: Option<FuzzyMatch>,
+) -> Option<u32> {
+    let needle = token.text.as_str();
+    let basename = entry.basename();
+    let path = entry.lower.as_str();
+
+    let mut matched = false;
+    let mut score = 0u32;
+
+    if let Some(matched_path) = path_match {
+        matched = true;
+        score = score.max((matched_path.score as u32).saturating_mul(128));
+        if matched_path.exact {
+            score = score.saturating_add(2_048);
+        }
+    }
+
+    if let Some(matched_basename) = basename_match {
+        matched = true;
+        let basename_score = (matched_basename.score as u32)
+            .saturating_mul(144)
+            .saturating_add(1_536);
+        score = score.max(basename_score);
+        if matched_basename.exact {
+            score = score.saturating_add(3_072);
+        }
+    }
+
+    if basename == needle {
+        matched = true;
+        score = score
+            .saturating_add(16_384)
+            .saturating_sub(basename.len() as u32);
+    } else if basename.starts_with(needle) {
+        matched = true;
+        score = score
+            .saturating_add(12_288)
+            .saturating_sub(basename.len() as u32);
+    } else if let Some(pos) = basename.find(needle) {
+        matched = true;
+        score = score.saturating_add(8_192u32.saturating_sub((pos as u32) * 32));
+    } else if let Some(pos) = path.find(needle) {
+        matched = true;
+        score = score.saturating_add(2_048u32.saturating_sub((pos as u32) * 8));
+    }
+
+    if let Some(acronym_score) = score_acronym_match(entry.basename_original(), needle) {
+        matched = true;
+        score = score.max(acronym_score.saturating_mul(2));
+    }
+
+    if let Some(typo_score) = score_typo_basename_match(entry.basename_original(), needle) {
+        matched = true;
+        score = score.max(typo_score);
+    }
+
+    matched.then_some(score)
+}
+
 fn pack_bigram(a: u8, b: u8) -> u16 {
     ((a as u16) << 8) | (b as u16)
 }
@@ -497,6 +759,35 @@ fn extract_trigrams(bytes: &[u8]) -> Vec<u32> {
 
 fn required_bigram_overlap(total: usize) -> usize {
     total.saturating_sub(2).max(2).min(total)
+}
+
+fn required_char_overlap(total: usize) -> usize {
+    total.saturating_sub(2).max(2).min(total)
+}
+
+fn approximate_char_candidates(bytes: &[u8], postings: &[Vec<u32>]) -> Vec<u32> {
+    let mut unique = bytes.to_vec();
+    unique.sort_unstable();
+    unique.dedup();
+    if unique.is_empty() {
+        return Vec::new();
+    }
+
+    let required = required_char_overlap(unique.len());
+    let mut counts: HashMap<u32, u8> = HashMap::new();
+    for byte in unique {
+        for &id in &postings[byte as usize] {
+            let count = counts.entry(id).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+    }
+
+    let mut out: Vec<u32> = counts
+        .into_iter()
+        .filter_map(|(id, count)| (count as usize >= required).then_some(id))
+        .collect();
+    out.sort_unstable();
+    out
 }
 
 fn extract_components(path: &str) -> Vec<Box<str>> {

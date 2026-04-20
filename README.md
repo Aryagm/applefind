@@ -19,6 +19,7 @@ the current path search engine.
 
 - repo-scale path collection with `ignore`
 - indexed candidate generation over path metadata
+- `neo_frizbee` reranking over reduced fuzzy candidate sets
 - bounded typo and acronym matching
 - benchmark CLI for scan vs indexed comparisons
 - `fff.nvim` comparison harness on identical corpora
@@ -82,7 +83,9 @@ The current speedup comes from a few simple systems choices:
 4. Result selection avoids a full sort. The engine uses
    `select_nth_unstable_by` for top-k truncation and only sorts the retained
    frontier.
-5. Large candidate sets score in parallel with `rayon`.
+5. Fuzzy ranking can use `neo_frizbee`, but only after the candidate planner has
+   already cut the corpus down.
+6. Large candidate sets score in parallel with `rayon`.
 
 That is why the win is strongest on selective and path-like queries. Broad
 one-character or very common queries still collapse toward scan behavior, and
@@ -114,9 +117,9 @@ not:
 > this already reproduces every `fff` ranking decision
 
 The repo now includes a dedicated quality harness for that gap. On path-like and
-selective queries the overlap is often reasonable; on broad fuzzy queries it is
-still far off `fff` because `applefind` is currently much stricter about what
-counts as a match.
+selective queries the overlap is often reasonable, and the current scorer is
+closer to `fff` than the original exact-only ranking. Broad fuzzy queries are
+still far off `fff`.
 
 ## Web Demo
 

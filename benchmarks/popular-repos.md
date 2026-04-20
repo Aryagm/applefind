@@ -103,6 +103,8 @@ Both engines indexed the same materialized VS Code tree. `applefind` collected
 
 - The strongest results are on selective and path-like queries because the
   candidate planner can discard most of the repo before scoring.
+- The current engine uses a hybrid approach: index-first candidate pruning, then
+  fuzzy reranking on the reduced set for normal file-search queries.
 - Broad queries still need work. When candidate counts approach the full corpus,
   the win shrinks or disappears.
 - `applefind` is not yet a semantic clone of `fff`. A few result counts differ
